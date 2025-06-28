@@ -1,43 +1,65 @@
-import TelegramBot from 'node-telegram-bot-api';
-import fetch from 'node-fetch';
-import cron from 'node-cron';
+require('dotenv').config(); // Load environment variables first
 
-// Debugging environment variables
+const TelegramBot = require('node-telegram-bot-api');
+const fetch = require('node-fetch');
+const cron = require('node-cron');
+
+// Enhanced environment validation
 console.log("🛠️ Environment Variables Check:");
-console.log("BOT_TOKEN:", process.env.BOT_TOKEN ? "✅ Loaded" : "❌ Missing");
-console.log("CHAT_ID:", process.env.CHAT_ID ? "✅ Loaded" : "❌ Missing");
-console.log("TZ:", process.env.TZ || "Not set (default: UTC)");
+const envVars = {
+  BOT_TOKEN: process.env.BOT_TOKEN,
+  CHAT_ID: process.env.CHAT_ID,
+  TZ: process.env.TZ || 'Asia/Jakarta'
+};
 
-// Validate required env variables
-if (!process.env.BOT_TOKEN || !process.env.CHAT_ID) {
+Object.entries(envVars).forEach(([key, value]) => {
+  console.log(`${key}: ${value ? "✅ Loaded" : "❌ Missing"}`);
+});
+
+if (!envVars.BOT_TOKEN || !envVars.CHAT_ID) {
   console.error("❌ FATAL: Missing required environment variables");
+  console.log("Please create a .env file with:");
+  console.log("BOT_TOKEN=your_telegram_bot_token");
+  console.log("CHAT_ID=your_chat_id");
+  console.log("TZ=Asia/Jakarta (optional)");
   process.exit(1);
 }
 
-const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
-const CHAT_ID = process.env.CHAT_ID;
+// Initialize bot
+const bot = new TelegramBot(envVars.BOT_TOKEN, { polling: true });
+const CHAT_ID = envVars.CHAT_ID;
 
 console.log("🤖 Bot Motivasi Quran Aktif...");
+console.log(`⏰ Timezone set to: ${envVars.TZ}`);
+
+// Improved error handling for API requests
+async function fetchWithRetry(url, retries = 3) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const response = await fetch(url);
+      if (response.ok) return await response.json();
+      throw new Error(`HTTP ${response.status}`);
+    } catch (error) {
+      if (i === retries - 1) throw error;
+      await new Promise(res => setTimeout(res, 1000 * (i + 1)));
+    }
+  }
+}
 
 async function getRandomAyah() {
   try {
     console.log('🔄 Mengambil ayat acak...');
     
-    // Fetch list of surahs
-    const surahsRes = await fetch('https://api.quran.gading.dev/surah');
-    if (!surahsRes.ok) throw new Error(`Failed to fetch surahs: ${surahsRes.status}`);
-    const { data: surahs } = await surahsRes.json();
-
-    // Select random surah
+    const { data: surahs } = await fetchWithRetry('https://api.quran.gading.dev/surah');
     const randomSurah = surahs[Math.floor(Math.random() * surahs.length)];
     
-    // Fetch surah details
-    const surahRes = await fetch(`https://api.quran.gading.dev/surah/${randomSurah.number}`);
-    if (!surahRes.ok) throw new Error(`Failed to fetch surah: ${surahRes.status}`);
-    const { data: surahDetail } = await surahRes.json();
+    const { data: surahDetail } = await fetchWithRetry(
+      `https://api.quran.gading.dev/surah/${randomSurah.number}`
+    );
 
-    // Select random verse
-    const randomVerse = surahDetail.verses[Math.floor(Math.random() * surahDetail.verses.length)];
+    const randomVerse = surahDetail.verses[
+      Math.floor(Math.random() * surahDetail.verses.length)
+    ];
 
     return {
       surahName: randomSurah.name.transliteration.id,
@@ -52,15 +74,19 @@ async function getRandomAyah() {
   }
 }
 
+// Enhanced message sending with retries
 async function sendAyah() {
-  try {
-    const ayah = await getRandomAyah();
-    if (!ayah) {
-      console.log('⏭️ Tidak ada ayat yang didapat, operasi dibatalkan.');
-      return;
-    }
+  const maxRetries = 3;
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const ayah = await getRandomAyah();
+      if (!ayah) {
+        console.log('⏭️ Tidak ada ayat yang didapat, operasi dibatalkan.');
+        return;
+      }
 
-    const message = `
+      const message = `
 📖 *Ayat Al-Quran Hari Ini*
 
 🕌 *Surah ${ayah.surahName} (${ayah.surahNumber}:${ayah.verseNumber})*
@@ -71,34 +97,54 @@ ${ayah.arabicText}
 _"${ayah.translation}"_
 
 #QuranHariIni #MotivasiIslami
-    `;
+      `;
 
-    await bot.sendMessage(CHAT_ID, message, { parse_mode: 'Markdown' });
-    console.log(`[${new Date().toLocaleString('id-ID')}] ✅ Ayat terkirim!`);
-  } catch (error) {
-    console.error('❌ Gagal mengirim ayat:', error.message);
+      await bot.sendMessage(CHAT_ID, message, { parse_mode: 'Markdown' });
+      console.log(`[${new Date().toLocaleString('id-ID')}] ✅ Ayat terkirim!`);
+      return;
+    } catch (error) {
+      console.error(`❌ Gagal mengirim ayat (attempt ${attempt}/${maxRetries}):`, error.message);
+      if (attempt === maxRetries) {
+        console.error('⚠️ Semua percobaan gagal, operasi dibatalkan');
+      } else {
+        await new Promise(res => setTimeout(res, 2000 * attempt));
+      }
+    }
   }
 }
 
 // Initial send when bot starts
 sendAyah();
 
-// Schedule daily sends
-const scheduleTimes = '0 5,21 * * *'; // 5 AM and 9 PM
-console.log(`⏰ Menjadwalkan kirim ayat dengan pola cron: ${scheduleTimes} (WIB)`);
+// Schedule daily sends (5 AM and 9 PM WIB)
+const scheduleTimes = '0 5,21 * * *';
+console.log(`⏰ Menjadwalkan kirim ayat jam: ${scheduleTimes.replace(' ', ':').replace(',', ' dan ')} WIB`);
+
 cron.schedule(scheduleTimes, sendAyah, {
-  timezone: process.env.TZ || 'Asia/Jakarta'
+  timezone: envVars.TZ
 });
 
-// Handle commands
+// Enhanced command handling
 bot.onText(/\/start/, (msg) => {
   bot.sendMessage(
     msg.chat.id,
-    'Assalamualaikum! Saya akan mengirim ayat Quran harian jam 5 pagi dan 9 malam WIB.'
+    'Assalamualaikum! Saya akan mengirim ayat Quran harian jam 5 pagi dan 9 malam WIB.\n\n' +
+    'Gunakan /ayat untuk mendapatkan ayat sekarang juga!'
   );
 });
 
-// Error handling
+bot.onText(/\/ayat/, (msg) => {
+  bot.sendMessage(msg.chat.id, 'Mengambil ayat acak...');
+  sendAyah();
+});
+
+// Improved error handling
 bot.on('polling_error', (error) => {
   console.error('❌ Polling error:', error.message);
+  console.log('⚠️ Bot akan mencoba restart otomatis dalam 5 detik...');
+  setTimeout(() => process.exit(1), 5000);
+});
+
+process.on('unhandledRejection', (error) => {
+  console.error('❌ Unhandled rejection:', error);
 });
