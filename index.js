@@ -1,37 +1,50 @@
 import TelegramBot from 'node-telegram-bot-api';
 import fetch from 'node-fetch';
 import cron from 'node-cron';
-import dotenv from 'dotenv';
-dotenv.config();
 
-console.log("🤖 Bot Motivasi Quran Aktif...");
+// Debugging environment variables
+console.log("🛠️ Environment Variables Check:");
+console.log("BOT_TOKEN:", process.env.BOT_TOKEN ? "✅ Loaded" : "❌ Missing");
+console.log("CHAT_ID:", process.env.CHAT_ID ? "✅ Loaded" : "❌ Missing");
+console.log("TZ:", process.env.TZ || "Not set (default: UTC)");
+
+// Validate required env variables
+if (!process.env.BOT_TOKEN || !process.env.CHAT_ID) {
+  console.error("❌ FATAL: Missing required environment variables");
+  process.exit(1);
+}
 
 const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 const CHAT_ID = process.env.CHAT_ID;
 
-// Fungsi untuk mengambil ayat acak dari API
-async function ambilAyatAcak() {
+console.log("🤖 Bot Motivasi Quran Aktif...");
+
+async function getRandomAyah() {
   try {
     console.log('🔄 Mengambil ayat acak...');
-    const res = await fetch('https://api.quran.gading.dev/surah');
-    if (!res.ok) throw new Error(`Gagal mengambil daftar surah: ${res.status}`);
+    
+    // Fetch list of surahs
+    const surahsRes = await fetch('https://api.quran.gading.dev/surah');
+    if (!surahsRes.ok) throw new Error(`Failed to fetch surahs: ${surahsRes.status}`);
+    const { data: surahs } = await surahsRes.json();
 
-    const data = await res.json();
-    const semuaSurah = data.data;
-    const surahAcak = semuaSurah[Math.floor(Math.random() * semuaSurah.length)];
+    // Select random surah
+    const randomSurah = surahs[Math.floor(Math.random() * surahs.length)];
+    
+    // Fetch surah details
+    const surahRes = await fetch(`https://api.quran.gading.dev/surah/${randomSurah.number}`);
+    if (!surahRes.ok) throw new Error(`Failed to fetch surah: ${surahRes.status}`);
+    const { data: surahDetail } = await surahRes.json();
 
-    const resSurah = await fetch(`https://api.quran.gading.dev/surah/${surahAcak.number}`);
-    if (!resSurah.ok) throw new Error(`Gagal mengambil detail surah: ${resSurah.status}`);
-
-    const detailSurah = await resSurah.json();
-    const ayatAcak = detailSurah.data.verses[Math.floor(Math.random() * detailSurah.data.verses.length)];
+    // Select random verse
+    const randomVerse = surahDetail.verses[Math.floor(Math.random() * surahDetail.verses.length)];
 
     return {
-      namaSurah: surahAcak.name.transliteration.id,
-      nomorSurah: surahAcak.number,
-      nomorAyat: ayatAcak.number.inSurah,
-      teksArab: ayatAcak.text.arab,
-      terjemahan: ayatAcak.translation.id
+      surahName: randomSurah.name.transliteration.id,
+      surahNumber: randomSurah.number,
+      verseNumber: randomVerse.number.inSurah,
+      arabicText: randomVerse.text.arab,
+      translation: randomVerse.translation.id
     };
   } catch (error) {
     console.error('❌ Gagal mengambil ayat:', error.message);
@@ -39,41 +52,53 @@ async function ambilAyatAcak() {
   }
 }
 
-// Fungsi untuk mengirim ayat ke Telegram
-async function kirimAyat() {
+async function sendAyah() {
   try {
-    const ayat = await ambilAyatAcak();
-    if (!ayat) {
-      console.log('⚠️ Tidak ada ayat yang didapat, operasi dibatalkan.');
+    const ayah = await getRandomAyah();
+    if (!ayah) {
+      console.log('⏭️ Tidak ada ayat yang didapat, operasi dibatalkan.');
       return;
     }
 
-    const pesan = `
+    const message = `
 📖 *Ayat Al-Quran Hari Ini*
 
-🕌 *Surah ${ayat.namaSurah} (${ayat.nomorSurah}:${ayat.nomorAyat})*
+🕌 *Surah ${ayah.surahName} (${ayah.surahNumber}:${ayah.verseNumber})*
 
-${ayat.teksArab}
+${ayah.arabicText}
 
 📌 *Terjemahan:*
-_"${ayat.terjemahan}"_
+_"${ayah.translation}"_
 
 #QuranHariIni #MotivasiIslami
     `;
 
-    await bot.sendMessage(CHAT_ID, pesan, { parse_mode: 'Markdown' });
+    await bot.sendMessage(CHAT_ID, message, { parse_mode: 'Markdown' });
     console.log(`[${new Date().toLocaleString('id-ID')}] ✅ Ayat terkirim!`);
   } catch (error) {
-    console.error('❌ Gagal mengirim ayat:', error);
+    console.error('❌ Gagal mengirim ayat:', error.message);
   }
 }
 
-// Kirim sekali saat bot pertama kali dijalankan
-kirimAyat();
+// Initial send when bot starts
+sendAyah();
 
-// Jadwalkan pengiriman otomatis
-console.log('⏰ Menjadwalkan kirim ayat jam 5 pagi dan 9 malam WIB...');
-cron.schedule('0 5 * * *', kirimAyat, { timezone: 'Asia/Jakarta' });    // Jam 5 pagi
-cron.schedule('0 21 * * *', kirimAyat, { timezone: 'Asia/Jakarta' });   // Jam 9 malam
+// Schedule daily sends
+const scheduleTimes = '0 5,21 * * *'; // 5 AM and 9 PM
+console.log(`⏰ Menjadwalkan kirim ayat dengan pola cron: ${scheduleTimes} (WIB)`);
+cron.schedule(scheduleTimes, sendAyah, {
+  timezone: process.env.TZ || 'Asia/Jakarta'
+});
 
-// Catatan: Gunakan '0 5,21 * * *' jika ingin menggabungkan dalam satu baris cron
+// Handle commands
+bot.onText(/\/start/, (msg) => {
+  bot.sendMessage(
+    msg.chat.id,
+    'Assalamualaikum! Saya akan mengirim ayat Quran harian jam 5 pagi dan 9 malam WIB.'
+  );
+});
+
+// Error handling
+bot.on('polling_error', (error) => {
+  console.error('❌ Polling error:', error.message);
+});
